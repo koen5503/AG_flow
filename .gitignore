@@ -7,3 +7,7 @@
 
 # Logs
 debug.log
+logs/
+
+# Temporary files
+*.bak
