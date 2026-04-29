@@ -1,14 +1,19 @@
+// Blynk Template ID and Name MUST be defined before includes
+#ifndef BLYNK_TEMPLATE_ID
+#define BLYNK_TEMPLATE_ID "TMPL4cHUVdAmC"
+#endif
+#ifndef BLYNK_TEMPLATE_NAME
+#define BLYNK_TEMPLATE_NAME "Beregening Doorstroming en Kraan"
+#endif
+
+#define BLYNK_PRINT Serial // Enable Blynk debug prints
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
 
-// Macros injected from .env:
-// WIFI_SSID
-// WIFI_PASS
-// BLYNK_AUTH_TOKEN
-// CALIBRATION_FACTOR
-
+// Other macros injected from .env:
 #ifndef WIFI_SSID
 #define WIFI_SSID "YourWiFiSSID"
 #endif
@@ -19,14 +24,6 @@
 
 #ifndef BLYNK_AUTH_TOKEN
 #define BLYNK_AUTH_TOKEN "YourBlynkAuthToken"
-#endif
-
-#ifndef BLYNK_TEMPLATE_ID
-#define BLYNK_TEMPLATE_ID "TMPLxxxxxx"
-#endif
-
-#ifndef BLYNK_TEMPLATE_NAME
-#define BLYNK_TEMPLATE_NAME "Quickstart Template"
 #endif
 
 #ifndef CALIBRATION_FACTOR
@@ -54,6 +51,9 @@ enum ValveState {
 ValveState currentValveState = VALVE_IDLE;
 unsigned long valveTriggerTime = 0;
 const unsigned long VALVE_PULSE_DURATION = 30; // ms
+bool isValveOpen = false; // Physical state of the bistable valve
+float totalAccumulatedLiters = 0; // Total volume since boot
+unsigned long lastIntervalStartTime = 0; // Timestamp of last 15-min report
 
 // ISR for flow sensor
 void IRAM_ATTR flowSensorISR() {
@@ -65,8 +65,9 @@ void IRAM_ATTR flowSensorISR() {
 // Function to trigger opening the valve
 void triggerValveOpen() {
     if (currentValveState != VALVE_IDLE) return; // Prevent concurrent triggers
-    Serial.println("Triggering valve OPEN...");
-    digitalWrite(VALVE_OPEN_PIN, HIGH); // Assuming HIGH triggers the pulse
+    Serial.println(">>> COMMAND: Open Valve");
+    digitalWrite(VALVE_OPEN_PIN, HIGH);
+    digitalWrite(VALVE_CLOSE_PIN, LOW);
     currentValveState = VALVE_OPENING;
     valveTriggerTime = millis();
 }
@@ -74,8 +75,9 @@ void triggerValveOpen() {
 // Function to trigger closing the valve
 void triggerValveClose() {
     if (currentValveState != VALVE_IDLE) return; // Prevent concurrent triggers
-    Serial.println("Triggering valve CLOSE...");
-    digitalWrite(VALVE_CLOSE_PIN, HIGH); // Assuming HIGH triggers the pulse
+    Serial.println(">>> COMMAND: Close Valve");
+    digitalWrite(VALVE_OPEN_PIN, LOW);
+    digitalWrite(VALVE_CLOSE_PIN, HIGH);
     currentValveState = VALVE_CLOSING;
     valveTriggerTime = millis();
 }
@@ -90,17 +92,23 @@ void sendFlowData() {
     pulseCount = 0;
     portEXIT_CRITICAL(&mux);
 
-    // Calculate liters
-    // Formula: pulses / CALIBRATION_FACTOR = volume in Liters
-    float liters = currentPulseCount / (float)CALIBRATION_FACTOR;
+    // Calculate liters based on factor: L/min = Hz / CALIBRATION_FACTOR
+    // Volume (L) = pulses / (CALIBRATION_FACTOR * 60)
+    float liters = currentPulseCount / ((float)CALIBRATION_FACTOR * 60.0);
+    totalAccumulatedLiters += liters;
+    lastIntervalStartTime = millis();
 
-    Serial.print("Pulses in last interval: ");
-    Serial.println(currentPulseCount);
-    Serial.print("Calculated Volume (L): ");
-    Serial.println(liters);
+    Serial.println("--- 1 MIN BLYNK REPORT ---");
+    Serial.print("Pulses: ");
+    Serial.print(currentPulseCount);
+    Serial.print(" | Liters: ");
+    Serial.print(liters);
+    Serial.print(" | Total: ");
+    Serial.println(totalAccumulatedLiters);
 
-    // Send to Blynk Virtual Pin 1
+    // Send to Blynk
     Blynk.virtualWrite(V1, liters);
+    Blynk.virtualWrite(V3, totalAccumulatedLiters);
 }
 
 // Blynk V2 listener for Valve Control
@@ -124,10 +132,6 @@ void setup() {
     Serial.println("========================================");
     Serial.println("  ESP32-C3 Water Flow & Valve Controller");
     Serial.println("========================================");
-    Serial.print("Firmware compiled: ");
-    Serial.print(__DATE__);
-    Serial.print(" ");
-    Serial.println(__TIME__);
 
     // Initialize Pins
     pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);
@@ -161,12 +165,36 @@ void setup() {
         Serial.println("WARNING: WiFi not connected! Will keep retrying...");
     }
 
-    // Configure Blynk (non-blocking - does not require WiFi to be connected)
-    Blynk.config(BLYNK_AUTH_TOKEN);
-    Blynk.connect(5000); // try to connect for 5 seconds, then continue
+    // Use Blynk.begin as recommended for standard initialization
+    Blynk.begin(BLYNK_AUTH_TOKEN, WIFI_SSID, WIFI_PASS);
 
-    // Setup 15-minute timer (900000 ms)
-    timer.setInterval(900000L, sendFlowData);
+    // Setup 1-minute timer for Blynk
+    timer.setInterval(60000L, sendFlowData);
+    lastIntervalStartTime = millis();
+    
+    // Heartbeat every 15 seconds to show active status and detailed flow
+    timer.setInterval(15000L, []() {
+        unsigned long currentPulses = 0;
+        portENTER_CRITICAL(&mux);
+        currentPulses = pulseCount;
+        portEXIT_CRITICAL(&mux);
+
+        float currentIntervalLiters = currentPulses / ((float)CALIBRATION_FACTOR * 60.0);
+        float totalSoFar = totalAccumulatedLiters + currentIntervalLiters;
+        
+        float elapsedMinutes = (millis() - lastIntervalStartTime) / 60000.0;
+        float avgFlowRate = (elapsedMinutes > 0.1) ? (currentIntervalLiters / elapsedMinutes) : 0;
+
+        Serial.print("[Heartbeat] Uptime: ");
+        Serial.print(millis() / 1000);
+        Serial.print("s | Valve: ");
+        Serial.print(isValveOpen ? "OPEN" : "CLOSED");
+        Serial.print(" | Total Flow: ");
+        Serial.print(totalSoFar, 3);
+        Serial.print(" L | Avg Flow (1m period): ");
+        Serial.print(avgFlowRate, 3);
+        Serial.println(" L/min");
+    });
     
     Serial.println("Setup complete. Running main loop...");
 }
@@ -180,10 +208,12 @@ void loop() {
         if (millis() - valveTriggerTime >= VALVE_PULSE_DURATION) {
             if (currentValveState == VALVE_OPENING) {
                 digitalWrite(VALVE_OPEN_PIN, LOW);
-                Serial.println("Valve OPEN pulse complete.");
+                isValveOpen = true;
+                Serial.println(">>> Valve is now OPEN (pulse complete)");
             } else if (currentValveState == VALVE_CLOSING) {
                 digitalWrite(VALVE_CLOSE_PIN, LOW);
-                Serial.println("Valve CLOSE pulse complete.");
+                isValveOpen = false;
+                Serial.println(">>> Valve is now CLOSED (pulse complete)");
             }
             currentValveState = VALVE_IDLE;
         }

@@ -1,23 +1,24 @@
 #include <unity.h>
 
-const float CALIBRATION_FACTOR = 4.5;
+#define CALIBRATION_FACTOR 5.5
 
 float calculateVolume(unsigned long pulses) {
-    return pulses / CALIBRATION_FACTOR;
+    return pulses / ((float)CALIBRATION_FACTOR * 60.0);
+}
+
+void test_volume_calculation() {
+    // 330 pulses / (5.5 * 60) = 1.0 liter
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 1.0, calculateVolume(330)); 
+    // 165 pulses / (5.5 * 60) = 0.5 liter
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 0.5, calculateVolume(165)); 
+    TEST_ASSERT_FLOAT_WITHIN(0.01, 0.0, calculateVolume(0)); 
 }
 
 void setUp(void) {}
 void tearDown(void) {}
 
-void test_volume_calculation(void) {
-    TEST_ASSERT_EQUAL_FLOAT(10.0, calculateVolume(45));
-    TEST_ASSERT_EQUAL_FLOAT(0.0, calculateVolume(0));
-    TEST_ASSERT_EQUAL_FLOAT(2.0, calculateVolume(9));
-}
-
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_volume_calculation);
-    UNITY_END();
-    return 0;
+    return UNITY_END();
 }
